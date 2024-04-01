@@ -1,48 +1,53 @@
-name: Merge v2 to v2.1
-
-# runs on
-# * manual trigger
-on:
-  workflow_dispatch:
-
 jobs:
-
   merge:
     name: Merge branches
-    runs-on: ubuntu-latest
-
+    runs-on: self-hosted
     steps:
+    - continue-on-error: true
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: v2.1
+    - continue-on-error: true
+      name: Run git merge
+      run: 'git config user.name github-actions
 
-      # always checkout v2.1, but fetch complete history
-      - uses: actions/checkout@v4
-        with:
-          ref: v2.1
-          fetch-depth: 0
+        git config user.email github-actions@github.com
 
-      # run merge without a commit (will be added in final step)
-      - name: Run git merge
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git merge origin/main
-          git diff --name-only --diff-filter=U | xargs -I@ bash -c "git checkout --ours @ && git add @"
+        git merge origin/main
 
-      # commit and create pr
-      - name: Create pull-request
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: Merging branch main into v2.1
-          branch: create-pull-request/merge-main-to-v2.1
-          branch-suffix: short-commit-hash
-          base: v2.1
-          labels: stargate-v2.1
-          title: Merging branch main into v2.1
-          body: |
-            Automated changes that try to merge main into v2.1. Note that all non-resolved conflicts were resolved using the `ours` git strategy. Please review the changes carefully.
+        git diff --name-only --diff-filter=U | xargs -I@ bash -c "git checkout --ours
+        @ && git add @"
 
-            In order to start the CI workflows for this pull request, please:
-            * reopen and open the issue in order to trigger GitHub workflows
-            * comment `/gcbrun` in order to trigger GCB builds
+        '
+    - continue-on-error: true
+      name: Create pull-request
+      uses: peter-evans/create-pull-request@v6
+      with:
+        base: v2.1
+        body: 'Automated changes that try to merge main into v2.1. Note that all non-resolved
+          conflicts were resolved using the `ours` git strategy. Please review the
+          changes carefully.
 
-            **IMPORTANT: When merging please use the fast-forward merge and avoid GitHub merge buttons.**
+
+          In order to start the CI workflows for this pull request, please:
+
+          * reopen and open the issue in order to trigger GitHub workflows
+
+          * comment `/gcbrun` in order to trigger GCB builds
+
+
+          **IMPORTANT: When merging please use the fast-forward merge and avoid GitHub
+          merge buttons.**
+
+          '
+        branch: create-pull-request/merge-main-to-v2.1
+        branch-suffix: short-commit-hash
+        commit-message: Merging branch main into v2.1
+        labels: stargate-v2.1
+        title: Merging branch main into v2.1
+        token: ${{ secrets.GITHUB_TOKEN }}
+name: Merge v2 to v2.1
+on:
+  repository_dispatch:
+    types: trigger-ga___merge-main-to-v2.1.yaml

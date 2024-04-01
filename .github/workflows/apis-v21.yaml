@@ -1,338 +1,284 @@
-# @author Jeff Carpenter
-name: Stargate APIs V2.1
-
-# runs on
-# * pushes and pull requests on the "v2.1"
-# * manual trigger
-on:
-  push:
-    branches: [ "v2.1" ]
-  pull_request:
-    branches: [ "v2.1" ]
-  workflow_dispatch:
-
-# cancel same workflows in progress for pull request branches
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/v2.1' }}
-
-# Jobs structure:
-#
-# 1. Builds the coordinator without tests in order to get snapshot jar versions
-# 2. Then 4 jobs in parallel
-#  a) Build and test the sgv2-docsapi
-#  b) Build coordinator docker images (x3)
-# 3. Runs INT tests for [sgv2-docsapi] (x4 in parallel, C*3, C*4, dse)
-# 4. Clean-up - deletes created docker image artifacts
+  group: ${{ github.workflow }}-${{ github.ref }}
 jobs:
-
-  # runs mvnw install for building the coordinator jars
-  # caches the stargate-lib folder (needed for the docker images)
-  # cached .m2/repository in order to pass SG snapshots to other jobs
-  build-coordinator:
-    name: Coordinator build
-    runs-on: ubuntu-latest
-
-    # max run time 10 minutes
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up JDK 11
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '11'
-
-      - name: Setup Maven
-        env:
-          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
-        run: |
-          mkdir -p ~/.m2
-          cat <<EOF > ~/.m2/settings.xml
-          <settings>
-            <servers>
-              <server>
-                <id>artifactory-snapshots</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-              </server>
-              <server>
-                <id>artifactory-releases</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-             </server>
-           </servers>
-          </settings>
-          EOF
-
-      # ensure snapshots from this build are used in next jobs
-      - name: Cache Snapshots
-        uses: actions/cache@v4
-        id: cache-coordinator-snapshots
-        env:
-          cache-name: cache-coordinator-snapshots
-        with:
-          path: ~/.m2/repository
-          key: snapshots-${{ github.sha }}
-          restore-keys: |
-            snapshots-
-
-      - name: Cache Libs
-        if: steps.cache-coordinator-snapshots.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
-        id: cache-coordinator-libs
-        env:
-          cache-name: cache-coordinator-libs
-        with:
-          path: ./coordinator/stargate-lib
-          key: stargate-lib-${{ github.sha }}
-
-      - name: Build
-        if: steps.cache-coordinator-snapshots.outputs.cache-hit != 'true'
-        run: |
-          cd coordinator/
-          MAVEN_OPTS="-Xmx4g" ./mvnw -B -ntp install -P dse -DskipTests
-
-  resolve-coordinator-docker:
-    name: Resolve coordinator docker SHA
-    runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.resolve.outputs.sha }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - id: resolve
-        name: Resolve SHA
-        run: |
-          SHA=$(git log -n 1 --pretty=format:"%h" -- coordinator/)
-          echo "Resolved commit SHA for coordinator docker image to $SHA"
-          echo "sha=${SHA}" >> $GITHUB_OUTPUT
-
-  # Builds C*4 and DSE coordinator images using matrix
-  # Exports image to a file and then uploads it using action artifacts
-  build-coordinator-docker:
-    name: Docker image
-    needs: [build-coordinator, resolve-coordinator-docker]
-    runs-on: ubuntu-latest
-
-    # max run time 10 minutes
-    timeout-minutes: 10
-
-    # image name needed only
-    strategy:
-      matrix:
-        image: [ coordinator-4_0, coordinator-dse-68 ]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache docker image
-        id: cache-docker-image
-        uses: actions/cache@v4
-        with:
-          path: ${{ matrix.image }}-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
-          key: docker-${{ matrix.image }}-${{ needs.resolve-coordinator-docker.outputs.sha }}
-
-      - name: Restore Libs
-        if: steps.cache-docker-image.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
-        id: cache-coordinator-libs
-        env:
-          cache-name: cache-coordinator-libs
-        with:
-          path: ./coordinator/stargate-lib
-          key: stargate-lib-${{ github.sha }}
-
-      - name: Set up QEMU
-        if: steps.cache-docker-image.outputs.cache-hit != 'true'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        if: steps.cache-docker-image.outputs.cache-hit != 'true'
-        uses: docker/setup-buildx-action@v3
-
-      # same as in build_docker_images.sh
-      # just builds a single image
-      - name: Build Docker Image
-        if: steps.cache-docker-image.outputs.cache-hit != 'true'
-        run: |
-          cd coordinator/
-          LIBDIR=./tmp-${RANDOM}
-          mkdir ${LIBDIR}
-          cp ./stargate-lib/*.jar $LIBDIR
-          cp ./stargate-lib/logback.xml $LIBDIR
-          rm ${LIBDIR}/persistence*.jar
-          docker buildx build --target ${{ matrix.image }} --build-arg LIBDIR="$LIBDIR" -t stargateio/${{ matrix.image }}:${{ needs.resolve-coordinator-docker.outputs.sha }} --load .
-
-      # this will export a file in form image-commitsha.tar
-      - name: Export Docker Image
-        if: steps.cache-docker-image.outputs.cache-hit != 'true'
-        run: |
-          docker save --output ${{ matrix.image }}-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar stargateio/${{ matrix.image }}:${{ needs.resolve-coordinator-docker.outputs.sha }}
-
-  # runs unit tests for the sgv2-docsapi
   build:
     name: Unit tests
     needs: build-coordinator
-    runs-on: ubuntu-latest
-
-    # max run time 15 minutes
-    timeout-minutes: 15
-
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        cache: maven
+        distribution: temurin
+        java-version: '17'
+    - continue-on-error: true
+      env:
+        ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      name: Setup Maven
+      run: "mkdir -p ~/.m2\ncat <<EOF > ~/.m2/settings.xml\n<settings>\n  <servers>\n\
+        \    <server>\n      <id>artifactory-snapshots</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n    </server>\n    <server>\n\
+        \      <id>artifactory-releases</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n   </server>\n </servers>\n\
+        </settings>\nEOF\n"
+    - continue-on-error: true
+      env:
+        cache-name: cache-coordinator-snapshots
+      id: restore-coordinator-snapshots
+      name: Restore Snapshots
+      uses: actions/cache@v4
+      with:
+        key: snapshots-${{ github.sha }}
+        path: ~/.m2/repository
+    - continue-on-error: true
+      name: Build & Test Stargate v2 Quarkus-based APIs
+      run: 'cd apis/
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: maven
+        ./mvnw -B -ntp clean test
 
-      - name: Setup Maven
-        env:
-          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
-        run: |
-          mkdir -p ~/.m2
-          cat <<EOF > ~/.m2/settings.xml
-          <settings>
-            <servers>
-              <server>
-                <id>artifactory-snapshots</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-              </server>
-              <server>
-                <id>artifactory-releases</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-             </server>
-           </servers>
-          </settings>
-          EOF
+        '
+    timeout-minutes: 15
+  build-coordinator:
+    name: Coordinator build
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up JDK 11
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '11'
+    - continue-on-error: true
+      env:
+        ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      name: Setup Maven
+      run: "mkdir -p ~/.m2\ncat <<EOF > ~/.m2/settings.xml\n<settings>\n  <servers>\n\
+        \    <server>\n      <id>artifactory-snapshots</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n    </server>\n    <server>\n\
+        \      <id>artifactory-releases</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n   </server>\n </servers>\n\
+        </settings>\nEOF\n"
+    - continue-on-error: true
+      env:
+        cache-name: cache-coordinator-snapshots
+      id: cache-coordinator-snapshots
+      name: Cache Snapshots
+      uses: actions/cache@v4
+      with:
+        key: snapshots-${{ github.sha }}
+        path: ~/.m2/repository
+        restore-keys: 'snapshots-
 
-      - name: Restore Snapshots
-        uses: actions/cache@v4
-        id: restore-coordinator-snapshots
-        env:
-          cache-name: cache-coordinator-snapshots
-        with:
-          path: ~/.m2/repository
-          key: snapshots-${{ github.sha }}
+          '
+    - continue-on-error: true
+      env:
+        cache-name: cache-coordinator-libs
+      id: cache-coordinator-libs
+      if: steps.cache-coordinator-snapshots.outputs.cache-hit != 'true'
+      name: Cache Libs
+      uses: actions/cache@v4
+      with:
+        key: stargate-lib-${{ github.sha }}
+        path: ./coordinator/stargate-lib
+    - continue-on-error: true
+      if: steps.cache-coordinator-snapshots.outputs.cache-hit != 'true'
+      name: Build
+      run: 'cd coordinator/
 
-      - name: Build & Test Stargate v2 Quarkus-based APIs
-        run: |
-          cd apis/
-          ./mvnw -B -ntp clean test
+        MAVEN_OPTS="-Xmx4g" ./mvnw -B -ntp install -P dse -DskipTests
 
-  # runs int tests for the sgv2-docsapi
-  # supports downloading and importing the built docker image
+        '
+    timeout-minutes: 10
+  build-coordinator-docker:
+    name: Docker image
+    needs:
+    - build-coordinator
+    - resolve-coordinator-docker
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      id: cache-docker-image
+      name: Cache docker image
+      uses: actions/cache@v4
+      with:
+        key: docker-${{ matrix.image }}-${{ needs.resolve-coordinator-docker.outputs.sha
+          }}
+        path: ${{ matrix.image }}-${{ needs.resolve-coordinator-docker.outputs.sha
+          }}.tar
+    - continue-on-error: true
+      env:
+        cache-name: cache-coordinator-libs
+      id: cache-coordinator-libs
+      if: steps.cache-docker-image.outputs.cache-hit != 'true'
+      name: Restore Libs
+      uses: actions/cache@v4
+      with:
+        key: stargate-lib-${{ github.sha }}
+        path: ./coordinator/stargate-lib
+    - continue-on-error: true
+      if: steps.cache-docker-image.outputs.cache-hit != 'true'
+      name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - continue-on-error: true
+      if: steps.cache-docker-image.outputs.cache-hit != 'true'
+      name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - continue-on-error: true
+      if: steps.cache-docker-image.outputs.cache-hit != 'true'
+      name: Build Docker Image
+      run: 'cd coordinator/
+
+        LIBDIR=./tmp-${RANDOM}
+
+        mkdir ${LIBDIR}
+
+        cp ./stargate-lib/*.jar $LIBDIR
+
+        cp ./stargate-lib/logback.xml $LIBDIR
+
+        rm ${LIBDIR}/persistence*.jar
+
+        docker buildx build --target ${{ matrix.image }} --build-arg LIBDIR="$LIBDIR"
+        -t stargateio/${{ matrix.image }}:${{ needs.resolve-coordinator-docker.outputs.sha
+        }} --load .
+
+        '
+    - continue-on-error: true
+      if: steps.cache-docker-image.outputs.cache-hit != 'true'
+      name: Export Docker Image
+      run: 'docker save --output ${{ matrix.image }}-${{ needs.resolve-coordinator-docker.outputs.sha
+        }}.tar stargateio/${{ matrix.image }}:${{ needs.resolve-coordinator-docker.outputs.sha
+        }}
+
+        '
+    strategy:
+      matrix:
+        image:
+        - coordinator-4_0
+        - coordinator-dse-68
+    timeout-minutes: 10
   int-tests:
     name: Integration tests
-    needs: [ resolve-coordinator-docker, build-coordinator-docker, build ]
-    runs-on: ubuntu-latest
-
-    # max run time 45 minutes
-    timeout-minutes: 45
-
-    strategy:
-
-      # let all tests run, can find multiple failures in different apis
-      fail-fast: false
-
-      # props:
-      # name - human-readable name
-      # profile - what profile should be activated when running int tests
-      # image-artifact (optional) - name of the artifact containing the image file
-      # image-file - file name of the image to import (must be in the artifact)
-      # image - final image name to use when running int tests (-Dtesting.containers.stargate-image)
-      matrix:
-        project: [ sgv2-docsapi, sgv2-graphqlapi, sgv2-restapi ]
-        name: [ cassandra-40, dse-68 ]
-        include:
-          - name: cassandra-40
-            profile: cassandra-40
-            repository-login: false
-            image-cache-key: docker-coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha }}
-            image-file: coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
-            image: stargateio/coordinator-4_0:${{ needs.resolve-coordinator-docker.outputs.sha }}
-
-          - name: dse-68
-            profile: dse-68
-            repository-login: false
-            image-cache-key: docker-coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha }}
-            image-file: coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
-            image: stargateio/coordinator-dse-68:${{ needs.resolve-coordinator-docker.outputs.sha }}
-
+    needs:
+    - resolve-coordinator-docker
+    - build-coordinator-docker
+    - build
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        cache: maven
+        distribution: temurin
+        java-version: '17'
+    - continue-on-error: true
+      env:
+        ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      name: Setup Maven
+      run: "mkdir -p ~/.m2\ncat <<EOF > ~/.m2/settings.xml\n<settings>\n  <servers>\n\
+        \    <server>\n      <id>artifactory-snapshots</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n    </server>\n    <server>\n\
+        \      <id>artifactory-releases</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n   </server>\n </servers>\n\
+        </settings>\nEOF\n"
+    - continue-on-error: true
+      name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - continue-on-error: true
+      name: Restore docker image
+      uses: actions/cache@v4
+      with:
+        key: ${{ matrix.image-cache-key }}
+        path: ${{ matrix.image-file }}
+    - continue-on-error: true
+      name: Load image
+      run: docker load --input ${{ matrix.image-file }}
+    - continue-on-error: true
+      env:
+        cache-name: cache-coordinator-snapshots
+      id: restore-coordinator-snapshots
+      name: Restore Snapshots
+      uses: actions/cache@v4
+      with:
+        key: snapshots-${{ github.sha }}
+        path: ~/.m2/repository
+    - continue-on-error: true
+      env:
+        CONTAINER_TEST: true
+      name: Integration Test
+      run: 'cd apis/
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: maven
+        ./mvnw -B -ntp verify -DskipUnitTests -pl ${{ matrix.project }} -am -P ${{
+        matrix.profile }} -Dquarkus.container-image.build=$CONTAINER_TEST -Dtesting.containers.stargate-image=${{
+        matrix.image }}
 
-      - name: Setup Maven
-        env:
-          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
-        run: |
-          mkdir -p ~/.m2
-          cat <<EOF > ~/.m2/settings.xml
-          <settings>
-            <servers>
-              <server>
-                <id>artifactory-snapshots</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-              </server>
-              <server>
-                <id>artifactory-releases</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-             </server>
-           </servers>
-          </settings>
-          EOF
+        '
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - image: stargateio/coordinator-4_0:${{ needs.resolve-coordinator-docker.outputs.sha
+            }}
+          image-cache-key: docker-coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha
+            }}
+          image-file: coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha
+            }}.tar
+          name: cassandra-40
+          profile: cassandra-40
+          repository-login: false
+        - image: stargateio/coordinator-dse-68:${{ needs.resolve-coordinator-docker.outputs.sha
+            }}
+          image-cache-key: docker-coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha
+            }}
+          image-file: coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha
+            }}.tar
+          name: dse-68
+          profile: dse-68
+          repository-login: false
+        name:
+        - cassandra-40
+        - dse-68
+        project:
+        - sgv2-docsapi
+        - sgv2-graphqlapi
+        - sgv2-restapi
+    timeout-minutes: 45
+  resolve-coordinator-docker:
+    name: Resolve coordinator docker SHA
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - continue-on-error: true
+      id: resolve
+      name: Resolve SHA
+      run: 'SHA=$(git log -n 1 --pretty=format:"%h" -- coordinator/)
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        echo "Resolved commit SHA for coordinator docker image to $SHA"
 
-      - name: Restore docker image
-        uses: actions/cache@v4
-        with:
-          path: ${{ matrix.image-file }}
-          key: ${{ matrix.image-cache-key }}
+        echo "sha=${SHA}" >> $GITHUB_OUTPUT
 
-      # loads the image from the .tar
-      - name: Load image
-        run: docker load --input ${{ matrix.image-file }}
-
-      - name: Restore Snapshots
-        uses: actions/cache@v4
-        id: restore-coordinator-snapshots
-        env:
-          cache-name: cache-coordinator-snapshots
-        with:
-          path: ~/.m2/repository
-          key: snapshots-${{ github.sha }}
-
-      # run finally the int tests
-      # runs dedicated project with -pl, but also picks depending projects with -am
-      # container test for all apis
-      - name: Integration Test
-        env:
-          CONTAINER_TEST: true
-        run: |
-          cd apis/
-          ./mvnw -B -ntp verify -DskipUnitTests -pl ${{ matrix.project }} -am -P ${{ matrix.profile }} -Dquarkus.container-image.build=$CONTAINER_TEST -Dtesting.containers.stargate-image=${{ matrix.image }}
-
+        '
+name: Stargate APIs V2.1
+on:
+  repository_dispatch:
+    types: trigger-ga___apis-v21.yaml

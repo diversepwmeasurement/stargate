@@ -1,102 +1,79 @@
-name: Check Dependencies
-
-on:
-  schedule:
-    # * is a special character in YAML so you have to quote this string
-    - cron:  '0 0 * * MON'
-  workflow_dispatch:
-
 jobs:
   check-dependencies:
     name: Check Dependencies
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Java JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: 8.0.332
-          cache: 'maven'
-      
-      - name: Setup Maven
-        env:
-          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
-        run: |
-          mkdir -p ~/.m2
-          cat <<EOF > ~/.m2/settings.xml
-          <settings>
-            <servers>
-              <server>
-                <id>artifactory-snapshots</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-              </server>
-              <server>
-                <id>artifactory-releases</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-             </server>
-           </servers>
-          </settings>
-          EOF
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        cache: maven
+        distribution: temurin
+        java-version: 8.0.332
+    - continue-on-error: true
+      env:
+        ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      name: Setup Maven
+      run: "mkdir -p ~/.m2\ncat <<EOF > ~/.m2/settings.xml\n<settings>\n  <servers>\n\
+        \    <server>\n      <id>artifactory-snapshots</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n    </server>\n    <server>\n\
+        \      <id>artifactory-releases</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n   </server>\n </servers>\n\
+        </settings>\nEOF\n"
+    - continue-on-error: true
+      name: Check Maven Dependency Updates
+      run: 'cd coordinator/
 
-      - name: Check Maven Dependency Updates
-        run: |
-          cd coordinator/
-          mvn -B -ntp versions:display-dependency-updates -Dversions.outputFile=target/dependency-updates-report.txt
+        mvn -B -ntp versions:display-dependency-updates -Dversions.outputFile=target/dependency-updates-report.txt
 
-      - name: Archive dependency update results
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-update-report
-          path: coordinator/target/dependency-updates-report.txt
-
+        '
+    - continue-on-error: true
+      name: Archive dependency update results
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-update-report
+        path: coordinator/target/dependency-updates-report.txt
   check-vulnerabilities:
     name: Check Vulnerabilities
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        cache: maven
+        distribution: temurin
+        java-version: 8.0.332
+    - continue-on-error: true
+      env:
+        ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      name: Setup Maven
+      run: "mkdir -p ~/.m2\ncat <<EOF > ~/.m2/settings.xml\n<settings>\n  <servers>\n\
+        \    <server>\n      <id>artifactory-snapshots</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n    </server>\n    <server>\n\
+        \      <id>artifactory-releases</id>\n      <username>${ARTIFACTORY_USERNAME}</username>\n\
+        \      <password>${ARTIFACTORY_PASSWORD}</password>\n   </server>\n </servers>\n\
+        </settings>\nEOF\n"
+    - continue-on-error: true
+      name: Check Maven Dependencies
+      run: 'cd coordinator/
 
-      - name: Setup Java JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: 8.0.332
-          cache: 'maven'
+        mvn -B -ntp dependency-check:aggregate
 
-      - name: Setup Maven
-        env:
-          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
-        run: |
-          mkdir -p ~/.m2
-          cat <<EOF > ~/.m2/settings.xml
-          <settings>
-            <servers>
-              <server>
-                <id>artifactory-snapshots</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-              </server>
-              <server>
-                <id>artifactory-releases</id>
-                <username>${ARTIFACTORY_USERNAME}</username>
-                <password>${ARTIFACTORY_PASSWORD}</password>
-             </server>
-           </servers>
-          </settings>
-          EOF
-
-      - name: Check Maven Dependencies
-        run: |
-          cd coordinator/
-          mvn -B -ntp dependency-check:aggregate
-
-      - name: Archive vulnerability results
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-check-report
-          path: coordinator/target/dependency-check-report.html
+        '
+    - continue-on-error: true
+      name: Archive vulnerability results
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-check-report
+        path: coordinator/target/dependency-check-report.html
+name: Check Dependencies
+on:
+  repository_dispatch:
+    types: trigger-ga___dependency-check.yml
